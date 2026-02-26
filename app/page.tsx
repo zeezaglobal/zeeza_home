@@ -234,14 +234,112 @@ function Globe() {
     const atmo = new THREE.Mesh(atmoGeo, atmoMat);
     globeGroup.add(atmo);
 
-    // Mouse
-    const mouse = { x: 0, y: 0, tx: 0, ty: 0 };
+    // === INPUT: Mouse + Gyroscope ===
+    const input = { x: 0, y: 0, tx: 0, ty: 0 };
+    let gyroActive = false;
+    let gyroBaseAlpha: number | null = null;
+    let gyroBaseBeta: number | null = null;
 
+    // Mouse (desktop fallback)
     const onMouseMove = (e: MouseEvent) => {
-      mouse.tx = (e.clientX / w) * 2 - 1;
-      mouse.ty = (e.clientY / h) * 2 - 1;
+      if (gyroActive) return; // Gyro takes priority when available
+      input.tx = (e.clientX / w) * 2 - 1;
+      input.ty = (e.clientY / h) * 2 - 1;
     };
     window.addEventListener("mousemove", onMouseMove);
+
+    // Touch fallback for manual rotation on mobile without gyro permission
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let touchBaseX = 0;
+    let touchBaseY = 0;
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (gyroActive) return;
+      const touch = e.touches[0];
+      touchStartX = touch.clientX;
+      touchStartY = touch.clientY;
+      touchBaseX = input.tx;
+      touchBaseY = input.ty;
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (gyroActive) return;
+      const touch = e.touches[0];
+      const dx = (touch.clientX - touchStartX) / w * 2;
+      const dy = (touch.clientY - touchStartY) / h * 2;
+      input.tx = touchBaseX + dx;
+      input.ty = touchBaseY + dy;
+    };
+
+    window.addEventListener("touchstart", onTouchStart, { passive: true });
+    window.addEventListener("touchmove", onTouchMove, { passive: true });
+
+    // Gyroscope via DeviceOrientation
+    const onDeviceOrientation = (e: DeviceOrientationEvent) => {
+      if (e.alpha === null || e.beta === null) return;
+
+      // Capture baseline on first reading so globe starts centered
+      if (gyroBaseAlpha === null) {
+        gyroBaseAlpha = e.alpha;
+        gyroBaseBeta = e.beta;
+      }
+
+      gyroActive = true;
+
+      // Calculate delta from baseline position
+      let deltaAlpha = (e.alpha - gyroBaseAlpha!);
+      let deltaBeta = (e.beta! - gyroBaseBeta!);
+
+      // Normalize alpha delta to [-180, 180]
+      if (deltaAlpha > 180) deltaAlpha -= 360;
+      if (deltaAlpha < -180) deltaAlpha += 360;
+
+      // Map gyro angles to input range:
+      // Alpha (yaw / left-right tilt): ±45° maps to ±1
+      // Beta (pitch / forward-back tilt): ±30° maps to ±1
+      const sensitivity = 1.0;
+      input.tx = Math.max(-1, Math.min(1, (deltaAlpha / 45) * sensitivity));
+      input.ty = Math.max(-1, Math.min(1, (deltaBeta / 30) * sensitivity));
+    };
+
+    // Request gyroscope permission (iOS 13+ requires explicit permission)
+    const requestGyro = () => {
+      if (
+        typeof DeviceOrientationEvent !== "undefined" &&
+        typeof (DeviceOrientationEvent as any).requestPermission === "function"
+      ) {
+        // iOS 13+
+        (DeviceOrientationEvent as any)
+          .requestPermission()
+          .then((state: string) => {
+            if (state === "granted") {
+              window.addEventListener("deviceorientation", onDeviceOrientation, true);
+            }
+          })
+          .catch(() => {});
+      } else if (typeof DeviceOrientationEvent !== "undefined") {
+        // Android & other browsers — just add the listener
+        window.addEventListener("deviceorientation", onDeviceOrientation, true);
+      }
+    };
+
+    // Auto-request on non-iOS, or wait for user gesture on iOS
+    if (
+      typeof DeviceOrientationEvent !== "undefined" &&
+      typeof (DeviceOrientationEvent as any).requestPermission === "function"
+    ) {
+      // iOS: need a user gesture — we attach a one-time tap handler
+      const onTapForGyro = () => {
+        requestGyro();
+        window.removeEventListener("touchend", onTapForGyro);
+        window.removeEventListener("click", onTapForGyro);
+      };
+      window.addEventListener("touchend", onTapForGyro, { once: true });
+      window.addEventListener("click", onTapForGyro, { once: true });
+    } else {
+      requestGyro();
+    }
 
     // Animate
     const clock = new THREE.Clock();
@@ -251,11 +349,12 @@ function Globe() {
       animId = requestAnimationFrame(animate);
       const t = clock.getElapsedTime();
 
-      mouse.x += (mouse.tx - mouse.x) * 0.04;
-      mouse.y += (mouse.ty - mouse.y) * 0.04;
+      // Smooth interpolation
+      input.x += (input.tx - input.x) * 0.04;
+      input.y += (input.ty - input.y) * 0.04;
 
-      globeGroup.rotation.y = t * 0.06 + mouse.x * 1.5;
-      globeGroup.rotation.x = mouse.y * 0.4;
+      globeGroup.rotation.y = t * 0.06 + input.x * 1.5;
+      globeGroup.rotation.x = input.y * 0.4;
 
       atmo.lookAt(camera.position);
 
@@ -286,7 +385,10 @@ function Globe() {
     return () => {
       cancelAnimationFrame(animId);
       window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("touchstart", onTouchStart);
+      window.removeEventListener("touchmove", onTouchMove);
       window.removeEventListener("resize", onResize);
+      window.removeEventListener("deviceorientation", onDeviceOrientation, true);
       if (container.contains(renderer.domElement)) {
         container.removeChild(renderer.domElement);
       }
@@ -307,7 +409,7 @@ export default function App() {
   }, []);
 
   const copyEmail = () => {
-    navigator.clipboard.writeText("info@zeezaglobal.ca");
+    navigator.clipboard.writeText("support@zeezaglobal.ca");
     setEmailCopied(true);
     setTimeout(() => setEmailCopied(false), 2200);
   };
