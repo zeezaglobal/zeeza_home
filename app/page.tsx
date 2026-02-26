@@ -544,7 +544,7 @@ export default function App() {
                 overflow: "visible",
               }}
             >
-              {emailCopied ? "✓ Copied to clipboard" : "info@zeezaglobal.ca"}
+              {emailCopied ? "✓ Copied to clipboard" : "support@zeezaglobal.ca"}
               {hovered && !emailCopied && (
                 <span style={{
                   position: "absolute",
