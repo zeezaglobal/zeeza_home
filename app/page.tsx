@@ -237,12 +237,13 @@ function Globe() {
     // === INPUT: Mouse + Gyroscope ===
     const input = { x: 0, y: 0, tx: 0, ty: 0 };
     let gyroActive = false;
-    let gyroBaseAlpha: number | null = null;
+    let gyroBaseGamma: number | null = null;
     let gyroBaseBeta: number | null = null;
+    let gyroReadingCount = 0;
 
     // Mouse (desktop fallback)
     const onMouseMove = (e: MouseEvent) => {
-      if (gyroActive) return; // Gyro takes priority when available
+      if (gyroActive) return;
       input.tx = (e.clientX / w) * 2 - 1;
       input.ty = (e.clientY / h) * 2 - 1;
     };
@@ -275,41 +276,52 @@ function Globe() {
     window.addEventListener("touchstart", onTouchStart, { passive: true });
     window.addEventListener("touchmove", onTouchMove, { passive: true });
 
-    // Gyroscope via DeviceOrientation
+    // === GYROSCOPE via DeviceOrientation ===
+    // Uses gamma (left-right tilt, -90 to 90) instead of alpha (compass heading).
+    // Alpha is unreliable on many devices and represents compass direction, not tilt.
+    // Gamma naturally maps to tilting the phone left/right in portrait mode.
     const onDeviceOrientation = (e: DeviceOrientationEvent) => {
-      if (e.alpha === null || e.beta === null) return;
+      if (e.gamma === null || e.beta === null) return;
 
-      // Capture baseline on first reading so globe starts centered
-      if (gyroBaseAlpha === null) {
-        gyroBaseAlpha = e.alpha;
+      gyroReadingCount++;
+      // Skip first few readings to let sensor stabilize
+      if (gyroReadingCount < 5) return;
+
+      // Capture baseline on first stable reading so globe starts centered
+      if (gyroBaseGamma === null) {
+        gyroBaseGamma = e.gamma;
         gyroBaseBeta = e.beta;
       }
 
       gyroActive = true;
 
-      // Calculate delta from baseline position
-      let deltaAlpha = (e.alpha - gyroBaseAlpha!);
-      let deltaBeta = (e.beta! - gyroBaseBeta!);
+      // gamma: left-right tilt in portrait, range [-90, 90]
+      // beta: front-back tilt in portrait, range [-180, 180]
+      let deltaGamma = e.gamma - gyroBaseGamma!;
+      let deltaBeta = e.beta! - gyroBaseBeta!;
 
-      // Normalize alpha delta to [-180, 180]
-      if (deltaAlpha > 180) deltaAlpha -= 360;
-      if (deltaAlpha < -180) deltaAlpha += 360;
+      // Normalize deltaBeta for wrap-around
+      if (deltaBeta > 180) deltaBeta -= 360;
+      if (deltaBeta < -180) deltaBeta += 360;
 
-      // Map gyro angles to input range:
-      // Alpha (yaw / left-right tilt): ±45° maps to ±1
-      // Beta (pitch / forward-back tilt): ±30° maps to ±1
-      const sensitivity = 1.0;
-      input.tx = Math.max(-1, Math.min(1, (deltaAlpha / 45) * sensitivity));
-      input.ty = Math.max(-1, Math.min(1, (deltaBeta / 30) * sensitivity));
+      // Map to input range ±1
+      // ±25° of tilt maps to full range — feels responsive but not twitchy
+      const sensitivity = 1.2;
+      input.tx = Math.max(-1, Math.min(1, (deltaGamma / 25) * sensitivity));
+      input.ty = Math.max(-1, Math.min(1, (deltaBeta / 25) * sensitivity));
     };
 
-    // Request gyroscope permission (iOS 13+ requires explicit permission)
-    const requestGyro = () => {
-      if (
-        typeof DeviceOrientationEvent !== "undefined" &&
-        typeof (DeviceOrientationEvent as any).requestPermission === "function"
-      ) {
-        // iOS 13+
+    // === Gyroscope Permission ===
+    // iOS 13+ requires requestPermission() called DIRECTLY inside a user gesture handler.
+    // Wrapping it in another function breaks the gesture chain and iOS silently rejects it.
+    const isIOS = typeof DeviceOrientationEvent !== "undefined" &&
+      typeof (DeviceOrientationEvent as any).requestPermission === "function";
+
+    let onTapForGyro: (() => void) | null = null;
+
+    if (isIOS) {
+      onTapForGyro = () => {
+        // Call requestPermission directly here — no wrapper, no setTimeout
         (DeviceOrientationEvent as any)
           .requestPermission()
           .then((state: string) => {
@@ -318,27 +330,12 @@ function Globe() {
             }
           })
           .catch(() => {});
-      } else if (typeof DeviceOrientationEvent !== "undefined") {
-        // Android & other browsers — just add the listener
-        window.addEventListener("deviceorientation", onDeviceOrientation, true);
-      }
-    };
-
-    // Auto-request on non-iOS, or wait for user gesture on iOS
-    if (
-      typeof DeviceOrientationEvent !== "undefined" &&
-      typeof (DeviceOrientationEvent as any).requestPermission === "function"
-    ) {
-      // iOS: need a user gesture — we attach a one-time tap handler
-      const onTapForGyro = () => {
-        requestGyro();
-        window.removeEventListener("touchend", onTapForGyro);
-        window.removeEventListener("click", onTapForGyro);
       };
-      window.addEventListener("touchend", onTapForGyro, { once: true });
+      // click fires reliably on iOS after touch; touchend can misfire during scrolls
       window.addEventListener("click", onTapForGyro, { once: true });
-    } else {
-      requestGyro();
+    } else if (typeof DeviceOrientationEvent !== "undefined") {
+      // Android & other browsers — just add the listener directly
+      window.addEventListener("deviceorientation", onDeviceOrientation, true);
     }
 
     // Animate
@@ -389,6 +386,9 @@ function Globe() {
       window.removeEventListener("touchmove", onTouchMove);
       window.removeEventListener("resize", onResize);
       window.removeEventListener("deviceorientation", onDeviceOrientation, true);
+      if (onTapForGyro) {
+        window.removeEventListener("click", onTapForGyro);
+      }
       if (container.contains(renderer.domElement)) {
         container.removeChild(renderer.domElement);
       }
